@@ -1,6 +1,5 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; compiler.cl: a full beet-to-lisp compiler
-;; Usage: reads beet code from stdin and writes lisp to stdout
 ;;
 ;; Copyright (c) 2014 Colin J. Fuller
 ;;
@@ -406,13 +405,21 @@
 
 (defun compile-remaining (remaining-nodes)
   (if remaining-nodes
-      (cons (compile-node (car remaining-nodes)) (compile-remaining (cdr remaining-nodes)))
+      (cons (compile-node (car remaining-nodes))
+            (compile-remaining (cdr remaining-nodes)))
       nil))
-
 
 (defun compile-all (input-stream output-stream)
     (let ((nodes (parse-all input-stream nil)))
       (dolist (f (compile-remaining nodes))
         (print f output-stream))))
 
-(compile-all *standard-input* *standard-output*)
+(defun compile-file (filename output-stream)
+  (with-open-file f filename)
+  (compile-all f output-stream))
+
+(defun compile-stdin (output-stream)
+  (compile-all *standard-input* output-stream))
+
+(defun compile-stdin-to-stdout ()
+  (compile-all *standard-input* *standard-output*))
