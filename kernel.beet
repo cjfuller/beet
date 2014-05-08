@@ -1,0 +1,75 @@
+# Things I need in my kernel:
+
+# Extremely simple printing.  This can probably move to an IO module later, but I need it now.
+# Basic math
+# Basic string operations
+# Error handling
+# Assignment (built-in using = function)
+# when
+
+# Conditionals
+
+def when(condition) {
+    ~WHEN(condition, ~EVAL(_bl))
+}
+
+# Basic printing
+def print(str) {
+    ~FORMAT(~T, "~A~%", str)
+}
+
+# Basic math
+
+def +(l, r) {
+    ~+(l, r)
+}
+
+def *(l, r) {
+    ~*(l, r)
+}
+
+def -(l, r) {
+    ~-(l, r)
+}
+
+def /(l, r) {
+    ~/(l, r)
+}
+
+def <(l, r) {
+    ~<(l, r)
+}
+
+def >(l, r) {
+    ~>(l, r)
+}
+
+def ==(l, r) {
+    ~EQUAL(l, r)
+}
+
+def mod(n, base) {
+    ~MOD(n, base)
+}
+
+# Basic string operations
+
+def glue(l, r) {
+    ~CONCATENATE(~QUOTE(~STRING), l, r)
+}
+
+def substr(str, start, end) {
+    + 1, 2
+}
+
+# Things I need in the preprocessor:
+
+# Binary operators
+# Objects/classes
+# Better import process (i.e. don't include if we've included it already in scope).
+# Method calls
+# Optional arguments
+# Block arguments
+# if / else
+# return
+# constants?

@@ -170,7 +170,7 @@
   (let ((c (safe-peek-char nil stream)))
     (cond
       ((comment-start-p c)
-       (eat-comment c)
+       (eat-comment stream)
        (get-token stream)
        )
       ((comma-p c)
@@ -217,19 +217,23 @@
   (let ((id `(:type variable :name ,(cadr curr-token)))
         (next (peek-token stream)))
     (cond
-      ; bare identifier -> function call
+      ; bare identifier or parens -> function call
       ((or (token-is-a-p next 'id)
-          (token-is-a-p next 'num)
-          (token-is-a-p next 'string)
-          (token-is-a-p next 'block))
-       (let ((args (parse (next-token stream) stream)))
+           (token-is-a-p next 'num)
+           (token-is-a-p next 'string)
+           (eql (cadr next) #\{ )
+           (eql (cadr next) #\( ))
+       (let ((args (if (eql (cadr next) #\{ )
+                       nil
+                       (parse (next-token stream) stream)))
+             (assoc-block (if (eql (cadr (peek-token stream)) #\{ )
+                              (parse (next-token stream) stream)
+                              nil)))
          ;; TODO: method . parsing
-         `(:type functioncall :name ,id :args ,args)))
-
-      ; parenthesized arguments -> function call
-      ((eql (cadr next) #\( )
-       (let ((args (parse-paren-expr (next-token stream) stream)))
-         `(:type functioncall :name ,id :args ,args)))
+         (let ((form `(:type functioncall :name ,id :args ,args :bl ,assoc-block)))
+           (if (token-is-a-p (peek-token stream) 'comma)
+               (parse-comma-expr form (next-token stream) stream)
+               form))))
 
       ; comma -> comma expression
       ((token-is-a-p next 'comma)
@@ -262,12 +266,12 @@
     ((package)
      (parse-package curr-token stream))
     (otherwise
-     '(:type :error :message "Unrecognized keyword."))))
+     '(:type error :message "Unrecognized keyword."))))
 
 (defun parse-kw-def (curr-token stream)
   (let ((name `(:type variable :name ,(cadr (next-token stream))))
-        (args (parse-paren-expr (next-token stream) stream))
-        (body (parse-block-expr (next-token stream) stream)))
+        (args (parse (next-token stream) stream))
+        (body (parse (next-token stream) stream)))
     `(:type function-definition :name ,name :args ,args :body ,body)))
 
 (defun parse-include (curr-token stream)
@@ -297,19 +301,25 @@
             (if (eql (peek-token stream) #\, )
                 (parse-comma-expr node (next-token stream) stream)
                 node)
-            '(:type :error :message "Expected ) after current node.")))))
+            `(:type error :message ,(concatenate 'string "Expected ) after current node.  "
+                                    "Got " (prin1-to-string next)
+                                    "  Current node: " (prin1-to-string node)))))))
 
-(defun parse-block-helper (bl curr-token stream)
+(defun parse-block-helper (bl n curr-token stream)
   (let ((next (next-token stream)))
     (cond ((token-is-a-p next 'eof)
-           '(:type :error :message "Expected } before EOF."))
+           '(:type error :message "Expected } before EOF."))
       ((eql (cadr next) #\} )
-           `(:type block :body ,(parse-all nil bl)))
+       (if (= n 0)
+           `(:type block :body ,(parse-all nil bl))
+           (parse-block-helper (append bl (list next)) (1- n) next stream)))
+      ((eql (cadr next) #\{ )
+       (parse-block-helper (append bl (list next)) (1+ n) next stream))
       (t
-       (parse-block-helper (append bl (list next)) next stream)))))
+       (parse-block-helper (append bl (list next)) n next stream)))))
 
 (defun parse-block-expr (curr-token stream)
-  (parse-block-helper () curr-token stream))
+  (parse-block-helper () 0 curr-token stream))
 
 (defun parse (curr-token stream)
     (cond
@@ -410,8 +420,10 @@
 
 (defun func-def-helper (name args body)
   (if args
-      `(defun ,name (,@args) ,@body)
-      `(defun ,name () ,@body)))
+      ;; TODO: need to check arity before getting to lisp because of this hack
+      ;; alternately associate blocks a different way
+      `(defun ,name (,@args &optional ,(intern (name-mangle "_bl"))) ,@body)
+      `(defun ,name (&optional ,(intern (name-mangle "_bl"))) ,@body)))
 
 (defun compile-function-definition (node &optional pkg)
   (if (node-type-is (getf node :args) 'comma-grouped)
@@ -428,10 +440,22 @@
 
 (defun compile-function-call (node)
   (if (node-type-is (getf node :args) 'comma-grouped)
-      `(,(compile-node (getf node :name)) ,@(compile-node (getf node :args)))
+      (if (getf node :bl)
+          `(,(compile-node (getf node :name))
+             ,@(compile-node (getf node :args))
+             (quote ,@(compile-node (getf node :bl))))
+          `(,(compile-node (getf node :name))
+             ,@(compil-node (getf node :args))))
       (if (getf node :args)
-          `(,(compile-node (getf node :name)) ,(compile-node (getf node :args)))
-          `(,(compile-node (getf node :name))))))
+          (if (getf node :bl)
+              `(,(compile-node (getf node :name))
+                 ,(compile-node (getf node :args))
+                 (quote ,@(compile-node (getf node :bl))))
+              `(,(compile-node (getf node :name))
+                 ,(compile-node (getf node :args))))
+          (if (getf node :bl)
+              `(,(compile-node (getf node :name)) (quote ,@(compile-node (getf node :bl))))
+              `(,(compile-node (getf node :name)))))))
 
 (defun compile-node (node &optional pkg)
   (cond
@@ -452,6 +476,9 @@
     ((node-type-is node 'error)
      (princ (getf node :message))
      nil)))
+
+(defun enclose-in-toplevel-block (nodes)
+  `((:type block :body ,nodes)))
 
 (defun get-package-name (node)
   (getf (getf node :pkg) :name))
@@ -480,18 +507,24 @@
                (compile-remaining (cdr remaining-nodes) pkg))))
       nil))
 
+(defun compile-helper (input-stream)
+  (let ((nodes (parse-all input-stream nil)))
+    (compile-remaining nodes)))
+
 (defun compile-include (source)
   (let ((sourcefile (find-include source)))
     (if sourcefile
         (with-open-file (include-file sourcefile)
-          (let ((nodes (parse-all include-file nil)))
-            (compile-remaining nodes)))
+          (compile-helper include-file))
           nil))) ;; TODO: actually signal an error here if it can't find the include
 
-(defun compile-all (input-stream output-stream)
-    (let ((nodes (parse-all input-stream nil)))
-      (dolist (f (compile-remaining nodes))
-        (print f output-stream))))
+(defun compile-all (input-stream output-stream &optional skip-prepend)
+  ;; prepend the kernel
+  (unless skip-prepend
+    (with-open-file (kernel "kernel.beet")
+      (compile-all kernel output-stream t)))
+  (dolist (f (compile-helper input-stream))
+    (print f output-stream)))
 
 (defun compile-file (filename output-stream)
   (with-open-file (f filename)
