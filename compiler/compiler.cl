@@ -22,7 +22,7 @@
 
 (defparameter *tokens* '(keyword id eof comma num other string))
 
-(defparameter *beet-keywords* '(def and or not defm macro))
+(defparameter *beet-keywords* '(def include package))
 
 (defun token (tk v)
   (list tk v)
@@ -52,7 +52,7 @@
        (or (initial-identifier-char-p character)
            (digit-char-p character)
            (member character '(#\$ #\@ #\! #\? #\. #\+ #\* #\= #\/ #\- #\& #\^
-                               #\< #\> #\~)))))
+                               #\< #\> #\~ #\:)))))
 
 (defun escape-char-p (character)
   (eql character #\\ ))
@@ -257,6 +257,10 @@
   (case (intern (string-upcase (cadr curr-token)))
     ((def)
      (parse-kw-def curr-token stream))
+    ((include)
+     (parse-include curr-token stream))
+    ((package)
+     (parse-package curr-token stream))
     (otherwise
      '(:type :error :message "Unrecognized keyword."))))
 
@@ -265,6 +269,13 @@
         (args (parse-paren-expr (next-token stream) stream))
         (body (parse-block-expr (next-token stream) stream)))
     `(:type function-definition :name ,name :args ,args :body ,body)))
+
+(defun parse-include (curr-token stream)
+  (let ((path (parse (next-token stream) stream)))
+    `(:type include :source ,path)))
+
+(defun parse-package (curr-token stream)
+  `(:type package-decl :pkg ,(parse (next-token stream) stream)))
 
 (defun parse-other (curr-token stream)
   (cond
@@ -333,6 +344,9 @@
 
 (defparameter *beet-mangle-prefix* "__beet_slaw_") ; if you mangle a beet, it becomes a delicious slaw!
 
+(defparameter *beet-loadpath* '((:relative ".") (:relative "lib")))
+;;TODO: env variable or something here
+
 (defun name-mangle (name)
   (concatenate 'string *beet-mangle-prefix* name))
 
@@ -342,6 +356,13 @@
       (subseq name 1)
       ;; otherwise, mangle
       (name-mangle name)))
+
+(defun packageify-name (name pkg)
+  (when pkg
+      (if (eql (char (getf name :name) 0) #\~)
+          (setf (getf name :name) (concatenate 'string "~" pkg ":" (subseq (getf name :name) 1)))
+          (setf (getf name :name) (concatenate 'string pkg ":" (getf name :name)))))
+  name)
 
 (defun node-type-is (node type)
   (eq (getf node :type) type))
@@ -361,20 +382,49 @@
 (defun compile-variable-expr (node)
   (intern (maybe-mangle (getf node :name))))
 
+(defun block-assignment-helper (nodes)
+  (unless nodes
+    (return-from block-assignment-helper nil))
+  (let ((node (car nodes)))
+    (if (and (eq (getf node :type) 'functioncall)
+             (equal (getf (getf node :name) :name) "="))
+        ;; It's an assignment.  We need to set up a let and then nest the
+        ;; remainder inside.  But first parse out the argument names.
+        (let ((lhs (compile-variable-expr (getf (getf node :args) :first))) ;;TODO: error if it's not a name
+              (rhs (getf (getf node :args) :rest)))
+          `((let ((,lhs ,(compile-node rhs)))
+             ,@(block-assignment-helper (cdr nodes)))))
+        ;; Not an assignment; concatenate this to the result of compiling the remainder
+        (cons (compile-node node) (block-assignment-helper (cdr nodes))))))
+
 (defun compile-block-expr (node)
-  (map 'list #'compile-node (getf node :body)))
+  (block-assignment-helper (getf node :body)))
+
+
+(defun parse-include-def (curr-token stream)
+  (let ((package (parse (next-toen stream) stream)))
+    `(:type inline-code :from :include :source ,package)))
+
+
+(defun compile-code-inline (node))
 
 (defun func-def-helper (name args body)
-  `(defun ,name (,@args) ,@body))
+  (if args
+      `(defun ,name (,@args) ,@body)
+      `(defun ,name () ,@body)))
 
-(defun compile-function-definition (node)
+(defun compile-function-definition (node &optional pkg)
   (if (node-type-is (getf node :args) 'comma-grouped)
-      (func-def-helper (compile-variable-expr (getf node :name))
+      (func-def-helper (compile-variable-expr (packageify-name (getf node :name) pkg))
                        (compile-comma-expr (getf node :args))
                        (compile-block-expr (getf node :body)))
-      (func-def-helper (compile-variable-expr (getf node :name))
-                       (cons (compile-node (getf node :args)) nil)
-                       (compile-block-expr (getf node :body)))))
+      (if (getf node :args)
+          (func-def-helper (compile-variable-expr (packageify-name (getf node :name) pkg))
+                           (cons (compile-node (getf node :args)) nil)
+                           (compile-block-expr (getf node :body)))
+          (func-def-helper (compile-variable-expr (packageify-name (getf node :name) pkg))
+                           nil
+                           (compile-block-expr (getf node :body))))))
 
 (defun compile-function-call (node)
   (if (node-type-is (getf node :args) 'comma-grouped)
@@ -383,7 +433,7 @@
           `(,(compile-node (getf node :name)) ,(compile-node (getf node :args)))
           `(,(compile-node (getf node :name))))))
 
-(defun compile-node (node)
+(defun compile-node (node &optional pkg)
   (cond
     ((node-type-is node 'comma-grouped)
      (compile-comma-expr node))
@@ -396,18 +446,47 @@
     ((node-type-is node 'variable)
      (compile-variable-expr node))
     ((node-type-is node 'function-definition)
-     (compile-function-definition node))
+     (compile-function-definition node pkg))
     ((node-type-is node 'functioncall)
      (compile-function-call node))
     ((node-type-is node 'error)
      (princ (getf node :message))
      nil)))
 
-(defun compile-remaining (remaining-nodes)
+(defun get-package-name (node)
+  (getf (getf node :pkg) :name))
+
+(defun include-source (node)
+  (getf (getf node :source) :value))
+
+(defun find-include (source)
+  (dolist (d *beet-loadpath*)
+    ;;TODO: subdirectory search
+    (let ((pn (make-pathname :directory d :name source)))
+      (when (probe-file pn)
+        (return-from find-include pn))))
+  nil)
+
+(defun compile-remaining (remaining-nodes &optional pkg)
   (if remaining-nodes
-      (cons (compile-node (car remaining-nodes))
-            (compile-remaining (cdr remaining-nodes)))
+      (cond
+        ((node-type-is (car remaining-nodes) 'package-decl)
+         (compile-remaining (cdr remaining-nodes) (get-package-name (car remaining-nodes))))
+        ((node-type-is (car remaining-nodes) 'include)
+         (append (compile-include (include-source (car remaining-nodes)))
+                 (compile-remaining (cdr remaining-nodes) pkg)))
+        (t
+         (cons (compile-node (car remaining-nodes) pkg)
+               (compile-remaining (cdr remaining-nodes) pkg))))
       nil))
+
+(defun compile-include (source)
+  (let ((sourcefile (find-include source)))
+    (if sourcefile
+        (with-open-file (include-file sourcefile)
+          (let ((nodes (parse-all include-file nil)))
+            (compile-remaining nodes)))
+          nil))) ;; TODO: actually signal an error here if it can't find the include
 
 (defun compile-all (input-stream output-stream)
     (let ((nodes (parse-all input-stream nil)))
@@ -415,11 +494,14 @@
         (print f output-stream))))
 
 (defun compile-file (filename output-stream)
-  (with-open-file f filename)
-  (compile-all f output-stream))
+  (with-open-file (f filename)
+    (compile-all f output-stream)))
 
 (defun compile-stdin (output-stream)
   (compile-all *standard-input* output-stream))
 
 (defun compile-stdin-to-stdout ()
   (compile-all *standard-input* *standard-output*))
+
+(when *args*
+  (compile-stdin-to-stdout))
