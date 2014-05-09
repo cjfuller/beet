@@ -7,10 +7,19 @@
 # Assignment (built-in using = function)
 # when
 
+def list(*list_elements) {
+    list_elements
+}
+
 # Conditionals
 
 def when(condition) {
-    ~WHEN(condition, ~EVAL(_bl))
+    ~WHEN(condition, eval(_bl))
+}
+
+def eval(bl, *args) {
+    = all_args, ~CONS(bl, args);
+    ~APPLY(~FUNCTION(~FUNCALL), all_args)
 }
 
 # Basic printing
@@ -52,6 +61,10 @@ def mod(n, base) {
     ~MOD(n, base)
 }
 
+def not(expr) {
+    ~NOT(expr)
+}
+
 # Basic string operations
 
 def glue(l, r) {
@@ -63,7 +76,7 @@ def substr(str, start, end) {
 }
 
 # Things I need in the preprocessor:
-
+# Macros (use this as much as possible to implement the remainder)
 # Binary operators
 # Objects/classes
 # Better import process (i.e. don't include if we've included it already in scope).

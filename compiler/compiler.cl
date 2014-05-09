@@ -209,9 +209,14 @@
 
 (defun parse-comma-expr (first curr-token stream)
   ;; curr-token is a comma
-  `(:type comma-grouped
-          :first ,first
-          :rest ,(parse (next-token stream) stream)))
+  (if (or (eql (cadr (peek-token stream)) #\} )
+           (eql (cadr (peek-token stream)) #\) ))
+       `(:type comma-grouped
+               :first ,first
+               :rest nil)
+       `(:type comma-grouped
+               :first ,first
+               :rest ,(parse (next-token stream) stream))))
 
 (defun parse-identifier-expr (curr-token stream)
   (let ((id `(:type variable :name ,(cadr curr-token)))
@@ -225,7 +230,7 @@
            (eql (cadr next) #\( ))
        (let ((args (if (eql (cadr next) #\{ )
                        nil
-                       (parse (next-token stream) stream)))
+                       (parse (next-token stream) stream t)))
              (assoc-block (if (eql (cadr (peek-token stream)) #\{ )
                               (parse (next-token stream) stream)
                               nil)))
@@ -281,24 +286,25 @@
 (defun parse-package (curr-token stream)
   `(:type package-decl :pkg ,(parse (next-token stream) stream)))
 
-(defun parse-other (curr-token stream)
+(defun parse-other (curr-token stream &optional bound)
   (cond
     ((eql (cadr curr-token) #\( )
-     (parse-paren-expr curr-token stream))
+     (parse-paren-expr curr-token stream bound))
     ((eql (cadr curr-token) #\{ )
      (parse-block-expr curr-token stream))
     ((eql (cadr curr-token) #\;)
      (parse (next-token stream) stream))))
 
-(defun parse-paren-expr (curr-token stream)
+
+(defun parse-paren-expr (curr-token stream &optional bound)
   (if (eq (cadr (peek-token stream)) #\) )
       (progn
         (next-token stream) ; eat close paren
         nil)
-      (let ((node (parse (next-token stream) stream))
+      (let ((node `(:type group :contents ,(parse (next-token stream) stream)))
             (next (next-token stream)))
         (if (eql (cadr next) #\) )
-            (if (eql (peek-token stream) #\, )
+            (if (and (not bound) (eql (cadr (peek-token stream)) #\, ))
                 (parse-comma-expr node (next-token stream) stream)
                 node)
             `(:type error :message ,(concatenate 'string "Expected ) after current node.  "
@@ -321,7 +327,7 @@
 (defun parse-block-expr (curr-token stream)
   (parse-block-helper () 0 curr-token stream))
 
-(defun parse (curr-token stream)
+(defun parse (curr-token stream &optional bound)
     (cond
       ((token-is-a-p curr-token 'id)
        (parse-identifier-expr curr-token stream))
@@ -332,19 +338,21 @@
       ((token-is-a-p curr-token 'keyword)
        (parse-keyword-expr curr-token stream))
       ((token-is-a-p curr-token 'other)
-       (parse-other curr-token stream))
+       (parse-other curr-token stream bound))
       ((token-is-a-p curr-token 'eof)
        nil)
       (t nil)))
 
 (defun parse-all (char-stream ts)
   (if ts
-      (if (= (length ts) 1)
-          (parse (next-token ts) ts)
+      (if (or (= (length ts) 0)
+              (not (peek-token ts)))
+          nil
           (append (list (parse (next-token ts) ts)) (parse-all char-stream ts)))
       (let ((ts (token-stream char-stream nil nil)))
         (parse-all char-stream ts))))
 
+;;(parse (next-token ts) ts)
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -352,7 +360,9 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 
-(defparameter *beet-mangle-prefix* "__beet_slaw_") ; if you mangle a beet, it becomes a delicious slaw!
+;(defparameter *beet-mangle-prefix* "__beet_slaw_") ; if you mangle a beet, it becomes a delicious slaw!
+
+(defparameter *beet-mangle-prefix* "__")
 
 (defparameter *beet-loadpath* '((:relative ".") (:relative "lib")))
 ;;TODO: env variable or something here
@@ -390,7 +400,10 @@
   (getf node :value))
 
 (defun compile-variable-expr (node)
-  (intern (maybe-mangle (getf node :name))))
+  (let ((mangled (maybe-mangle (getf node :name))))
+    (if (eql (char mangled 0) #\:)
+        (read-from-string mangled)
+        (intern mangled))))
 
 (defun block-assignment-helper (nodes)
   (unless nodes
@@ -408,54 +421,93 @@
         (cons (compile-node node) (block-assignment-helper (cdr nodes))))))
 
 (defun compile-block-expr (node)
-  (block-assignment-helper (getf node :body)))
-
+  (let ((body (block-assignment-helper (getf node :body))))
+    (if (and (listp (car body))
+             (equal (car (car body)) (intern (name-mangle "->"))))
+        (let ((unbound (cddr (car body))))
+          `(lambda ,unbound ,@(cdr body)))
+        `(lambda nil ,@body))))
 
 (defun parse-include-def (curr-token stream)
-  (let ((package (parse (next-toen stream) stream)))
+  (let ((package (parse (next-token stream) stream)))
     `(:type inline-code :from :include :source ,package)))
 
 
 (defun compile-code-inline (node))
 
+(defun compile-group-expr (node)
+  (compile-node (getf node :contents)))
+
 (defun func-def-helper (name args body)
+  `(defun ,name (,(intern (name-mangle "_bl")) ,@(func-args-helper args)) (funcall ,body)))
+
+(defun is-glob-arg (sym)
+  (eql (char (symbol-name sym) (length *beet-mangle-prefix*)) #\*))
+
+(defun deglob-arg (sym)
+  (let ((strname (symbol-name sym)))
+    (intern (concatenate 'string
+                         (subseq strname 0 (length *beet-mangle-prefix*))
+                         (subseq strname (1+ (length *beet-mangle-prefix*)))))))
+
+(defun func-args-helper (args)
   (if args
-      ;; TODO: need to check arity before getting to lisp because of this hack
-      ;; alternately associate blocks a different way
-      `(defun ,name (,@args &optional ,(intern (name-mangle "_bl"))) ,@body)
-      `(defun ,name (&optional ,(intern (name-mangle "_bl"))) ,@body)))
+      (if (is-glob-arg (car args))
+          (cons '&rest (cons (deglob-arg (car args)) (func-args-helper (cdr args))))
+          (cons (car args) (func-args-helper (cdr args))))
+      nil))
 
 (defun compile-function-definition (node &optional pkg)
-  (if (node-type-is (getf node :args) 'comma-grouped)
-      (func-def-helper (compile-variable-expr (packageify-name (getf node :name) pkg))
-                       (compile-comma-expr (getf node :args))
-                       (compile-block-expr (getf node :body)))
+  (let ((args (compile-node (getf node :args))))
+    (if (or (node-type-is (getf node :args) 'comma-grouped)
+            (and (node-type-is (getf node :args) 'group)
+                 (node-type-is (getf (getf node :args) :contents) 'comma-grouped)))
+        (func-def-helper (compile-variable-expr (packageify-name (getf node :name) pkg))
+                         args
+                         (compile-block-expr (getf node :body)))
+        (if (getf node :args)
+            (func-def-helper (compile-variable-expr (packageify-name (getf node :name) pkg))
+                             (cons args nil)
+                             (compile-block-expr (getf node :body)))
+            (func-def-helper (compile-variable-expr (packageify-name (getf node :name) pkg))
+                             nil
+                             (compile-block-expr (getf node :body)))))))
+
+(defun is-beety-name (name)
+  (not (eql (char name 0) #\~)))
+
+(defun compile-beety-function-call (node)
+    (if (or (node-type-is (getf node :args) 'comma-grouped)
+            (and (node-type-is (getf node :args) 'group)
+                 (node-type-is (getf (getf node :args) :contents) 'comma-grouped)))
+        `(,(compile-node (getf node :name))
+           ,(compile-node (getf node :bl))
+           ,@(compile-node (getf node :args)))
+        (if (getf node :args)
+            `(,(compile-node (getf node :name))
+               ,(compile-node (getf node :bl))
+               ,(compile-node (getf node :args)))
+            `(,(compile-node (getf node :name))
+               ,(compile-node (getf node :bl))))))
+
+(defun compile-native-function-call (node)
+;; don't give it a block if it doesn't expect one!!
+  (if (or (node-type-is (getf node :args) 'comma-grouped)
+          (and (node-type-is (getf node :args) 'group)
+               (node-type-is (getf (getf node :args) :contents) 'comma-grouped)))
+      `(,(compile-node (getf node :name))
+         ,@(compile-node (getf node :args)))
       (if (getf node :args)
-          (func-def-helper (compile-variable-expr (packageify-name (getf node :name) pkg))
-                           (cons (compile-node (getf node :args)) nil)
-                           (compile-block-expr (getf node :body)))
-          (func-def-helper (compile-variable-expr (packageify-name (getf node :name) pkg))
-                           nil
-                           (compile-block-expr (getf node :body))))))
+          `(,(compile-node (getf node :name))
+             ,(compile-node (getf node :args)))
+          `(,(compile-node (getf node :name))))))
 
 (defun compile-function-call (node)
-  (if (node-type-is (getf node :args) 'comma-grouped)
-      (if (getf node :bl)
-          `(,(compile-node (getf node :name))
-             ,@(compile-node (getf node :args))
-             (quote ,@(compile-node (getf node :bl))))
-          `(,(compile-node (getf node :name))
-             ,@(compil-node (getf node :args))))
-      (if (getf node :args)
-          (if (getf node :bl)
-              `(,(compile-node (getf node :name))
-                 ,(compile-node (getf node :args))
-                 (quote ,@(compile-node (getf node :bl))))
-              `(,(compile-node (getf node :name))
-                 ,(compile-node (getf node :args))))
-          (if (getf node :bl)
-              `(,(compile-node (getf node :name)) (quote ,@(compile-node (getf node :bl))))
-              `(,(compile-node (getf node :name)))))))
+  (if (is-beety-name (getf (getf node :name) :name))
+      (compile-beety-function-call node)
+      (compile-native-function-call node)))
+
+
 
 (defun compile-node (node &optional pkg)
   (cond
@@ -473,6 +525,8 @@
      (compile-function-definition node pkg))
     ((node-type-is node 'functioncall)
      (compile-function-call node))
+    ((node-type-is node 'group)
+     (compile-group-expr node))
     ((node-type-is node 'error)
      (princ (getf node :message))
      nil)))
