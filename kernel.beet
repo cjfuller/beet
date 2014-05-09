@@ -7,73 +7,104 @@
 # Assignment (built-in using = function)
 # when
 
-def list(*list_elements) {
+# Misc global aliases
+
+def func(fn)
+    ~FUNCTION(fn)
+
+# TODO: this only works for beety functions
+def apply(fn, l)
+    ~APPLY(fn, ~LIST(~NIL, l))
+
+
+# List processing
+
+def list(*list_elements)
     list_elements
-}
+
+
+def cons(h, t)
+    ~CONS(h, t)
+
+
+def first(l)
+    ~CAR(l)
+
+
+def next(l)
+    ~CADR(l)
+
+
+def rest(l)
+    ~CDR(l)
+
 
 # Conditionals
 
-def when(condition) {
+def when(condition)
     ~WHEN(condition, eval(_bl))
-}
 
-def eval(bl, *args) {
-    = all_args, ~CONS(bl, args);
+
+def eval(bl, *args)
+    = all_args, ~CONS(bl, args)
     ~APPLY(~FUNCTION(~FUNCALL), all_args)
-}
+
 
 # Basic printing
-def print(str) {
+def print(str)
     ~FORMAT(~T, "~A~%", str)
-}
+
+
+def p(str)
+    ~PRINT(str)
+
 
 # Basic math
 
-def +(l, r) {
+def +(l, r)
     ~+(l, r)
-}
 
-def *(l, r) {
+
+def *(l, r)
     ~*(l, r)
-}
 
-def -(l, r) {
+
+def -(l, r)
     ~-(l, r)
-}
 
-def /(l, r) {
+
+def /(l, r)
     ~/(l, r)
-}
 
-def <(l, r) {
+
+def <(l, r)
     ~<(l, r)
-}
 
-def >(l, r) {
+
+def >(l, r)
     ~>(l, r)
-}
 
-def ==(l, r) {
+
+def ==(l, r)
     ~EQUAL(l, r)
-}
 
-def mod(n, base) {
+
+def mod(n, base)
     ~MOD(n, base)
-}
 
-def not(expr) {
+
+def not(expr)
     ~NOT(expr)
-}
+
 
 # Basic string operations
 
-def glue(l, r) {
-    ~CONCATENATE(~QUOTE(~STRING), l, r)
-}
+def glue(*args)
+    ~APPLY(~FUNCTION(~CONCATENATE), ~APPEND(~LIST(~QUOTE(~STRING)), args))
 
-def substr(str, start, end) {
+
+def substr(str, start, end)
     + 1, 2
-}
 
 # Things I need in the preprocessor:
 # Macros (use this as much as possible to implement the remainder)
@@ -86,3 +117,4 @@ def substr(str, start, end) {
 # if / else
 # return
 # constants?
+# aliases

@@ -20,9 +20,9 @@
 ;; Lexer
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-(defparameter *tokens* '(keyword id eof comma num other string))
+(defparameter *tokens* '(keyword id eof comma num other string sig-space))
 
-(defparameter *beet-keywords* '(def include package))
+(defparameter *beet-keywords* '(def include package macro))
 
 (defun token (tk v)
   (list tk v)
@@ -37,7 +37,10 @@
 
 (defun whitespace-char-p (character)
   "See if the character is whitespace."
-  (member character '(#\Tab #\Linefeed #\Return #\Page #\Space #\Newline)))
+  (member character '(#\Tab #\Page #\Space)))
+
+(defun newline-p (character)
+  (member character '(#\Newline #\Linefeed #\Return)))
 
 (defun comment-start-p (character)
   "See if the character starts a comment."
@@ -102,11 +105,22 @@
 (defun eat-comment (stream)
   (read-line stream))
 
+
+
 (defun eat-whitespace (stream)
   (let ((c (safe-peek-char nil stream)))
-    (when (and c (whitespace-char-p c))
-      (eat-char stream)
-      (eat-whitespace stream))))
+    (if (and c (whitespace-char-p c))
+      (progn
+        (eat-char stream)
+        (eat-whitespace stream))
+      (when (and c (newline-p c))
+        (eat-char stream)
+        (token 'sig-space (build-significant-whitespace-token stream))))))
+
+(defun build-significant-whitespace-token (stream)
+  (if (whitespace-char-p (safe-peek-char nil stream))
+      (concatenate 'string (list (eat-char stream)) (build-significant-whitespace-token stream))
+      nil))
 
 (defun build-identifier (input-stream output-stream)
   (if output-stream
@@ -162,7 +176,9 @@
   (when (eof-p stream)
     (return-from get-token (token 'eof nil)))
 
-  (eat-whitespace stream)
+  (let ((ws-token (eat-whitespace stream)))
+    (when ws-token
+      (return-from get-token ws-token)))
 
   (when (eof-p stream)
     (return-from get-token (token 'eof nil)))
@@ -270,6 +286,8 @@
      (parse-include curr-token stream))
     ((package)
      (parse-package curr-token stream))
+    ((macro)
+     (parse-macro curr-token stream))
     (otherwise
      '(:type error :message "Unrecognized keyword."))))
 
@@ -278,6 +296,10 @@
         (args (parse (next-token stream) stream))
         (body (parse (next-token stream) stream)))
     `(:type function-definition :name ,name :args ,args :body ,body)))
+
+(defun parse-macro (curr-token stream)
+  ;;TODO
+)
 
 (defun parse-include (curr-token stream)
   (let ((path (parse (next-token stream) stream)))
@@ -317,7 +339,7 @@
            '(:type error :message "Expected } before EOF."))
       ((eql (cadr next) #\} )
        (if (= n 0)
-           `(:type block :body ,(parse-all nil bl))
+           `(:type block :body ,(parse-all nil bl t))
            (parse-block-helper (append bl (list next)) (1- n) next stream)))
       ((eql (cadr next) #\{ )
        (parse-block-helper (append bl (list next)) (1+ n) next stream))
@@ -341,19 +363,168 @@
        (parse-other curr-token stream bound))
       ((token-is-a-p curr-token 'eof)
        nil)
+      ((token-is-a-p curr-token 'sig-space)
+       (parse (next-token stream) stream))
       (t nil)))
 
-(defun parse-all (char-stream ts)
-  (if ts
-      (if (or (= (length ts) 0)
-              (not (peek-token ts)))
-          nil
-          (append (list (parse (next-token ts) ts)) (parse-all char-stream ts)))
-      (let ((ts (token-stream char-stream nil nil)))
-        (parse-all char-stream ts))))
+(defun parse-all (raw-char-stream raw-ts &optional skip-preprocess)
+  (let ((char-stream (if skip-preprocess
+                         raw-char-stream
+                         (preprocess-character-stream raw-char-stream)))
+        (ts (if skip-preprocess
+                raw-ts
+                (preprocess-token-stream raw-ts))))
+    (if ts
+        (if (or (= (length ts) 0)
+                (not (peek-token ts)))
+            nil
+            (append (list (parse (next-token ts) ts)) (parse-all char-stream ts t)))
+        (let ((ts (token-stream char-stream nil nil)))
+          (parse-all char-stream ts)))))
 
-;;(parse (next-token ts) ts)
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Preprocessor
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; The preprocessor is a pluggable system for processing beet code files.  It
+;; operates in three phases:
+;; 1.  Filtering of the character stream for the file directly.
+;; 2.  Filtering of the token stream.
+;; (3.  Macro expansion.) -- Under development/consideration.  I'm envisioning
+;; this as somewhat different from lisp macros, and I'll need to think about
+;; this more.  My current vision is as the inverse of the current block model
+;; -- essentially code without a binding, where you declare any variables that
+;; you *do* want to be bound to the macro scope.  I want to add flexibility in
+;; argument parsing, which is a little trickier.
+;;
+;; A function that operates as part of the preprocessor should do one of three things:
+;; 1.  Take a character stream and return a processed character stream.
+;; 2.  Take a token stream and return a processed token stream.
+;; 3.  Take a token and return a processed token.
+;;
+;; Plugins that do one of these three things can be activated using (register-pp-charstream fct),
+;; (register-pp-tokenstream fct), or (register-pp-token fct).
+
+(defparameter *beet-pp-charstream-plugins* nil)
+(defparameter *beet-pp-tokenstream-plugins* nil)
+(defparameter *beet-pp-token-plugins* nil)
+
+(defun register-pp-charstream (fct)
+  (setf *beet-pp-charstream-plugins*
+        (append *beet-pp-charstream-plugins* (cons fct nil))))
+
+(defun register-pp-tokenstream (fct)
+  (setf *beet-pp-tokenstream-plugins*
+        (append *beet-pp-tokenstream-plugins* (cons fct nil))))
+
+(defun register-pp-token (fct)
+  (setf *beet-pp-token-plugins*
+        (append *beet-pp-token-plugins* (cons fct nil))))
+
+(defun apply-token-plugin (ts tpl)
+  (let ((output nil))
+    (dolist (tk ts)
+      (setf output (append output (list (funcall tpl tk)))))
+    output))
+
+(defun token-tokenstream-plugin (ts)
+  (dolist (tpl *beet-pp-token-plugins*)
+    (setf ts (apply-token-plugin ts tpl)))
+  ts)
+
+(register-pp-tokenstream (function token-tokenstream-plugin))
+
+(defun preprocess-token-stream (ts)
+  (dolist (pl *beet-pp-tokenstream-plugins*)
+    (setf ts (funcall pl ts)))
+  ts)
+
+(defun preprocess-character-stream (cs &optional cs-out)
+  (if (eof-p cs)
+      cs ;; should be cs-out
+      cs))
+
+;; built-in preprocessor plugins
+
+; aliasing plugin
+(defun alias-plugin (ts &optional alias-table output-stream)
+;; Syntax: alias <existing-name> as <new-name>
+;; Defines the pseudo-function "alias", which causes the subsequent id token to
+;; be added to an alias table with the value of the subsequent .  Any id tokens that are in the alias table will
+;; be substituted for an id token with the aliased name.
+  (if alias-table
+      (if (and ts
+               (car ts))
+          (let ((tk (next-token ts)))
+            (if (and (token-is-a-p tk 'id)
+                     (equal (cadr tk) "alias"))
+                (let* ((old-name (next-token ts))
+                       (as (next-token ts)) ;; TODO: error if this isn't "as"
+                       (new-name  (intern (cadr (next-token ts))))) ;; TODO: error if the names aren't type "id"
+                  (setf (gethash new-name alias-table) old-name)
+                  (alias-plugin ts alias-table output-stream))
+                (if (and (token-is-a-p tk 'id)
+                         (gethash (intern (cadr tk)) alias-table))
+                    (alias-plugin ts alias-table
+                                  (append output-stream
+                                          (list (gethash (intern (cadr tk))
+                                                         alias-table))))
+                    (alias-plugin ts alias-table (append output-stream (list tk))))))
+          output-stream)
+      (alias-plugin ts (make-hash-table) output-stream)))
+
+(register-pp-tokenstream (function alias-plugin))
+
+; significant whitespace plugin
+(defun whitespace-plugin (ts &optional (unmatched-paren-count 0) (last-indent-level (list 0)) output-stream)
+  (if (and ts
+           (car ts))
+      (let ((tk (next-token ts)))
+        (if (token-is-a-p tk 'sig-space)
+            (progn
+              (if (and (> (length (cadr tk))
+                          (car last-indent-level))
+                       (= unmatched-paren-count 0))
+                  (whitespace-plugin ts unmatched-paren-count (cons (length (cadr tk)) last-indent-level)
+                                     (append output-stream
+                                             (list (token 'other #\{ ))))
+                  (if (and (< (length (cadr tk))
+                              (car last-indent-level))
+                           (= unmatched-paren-count 0))
+                      ;; If we're decreasing indent level, push this token back
+                      ;; onto the stream, pop the indent pevel, and insert a }.
+                      ;; This allows us to handle multiple decreasing levels at
+                      ;; once at the cost of extraneous semicolons.
+                      (whitespace-plugin (cons tk ts) unmatched-paren-count (cdr last-indent-level)
+                                         (append output-stream
+                                                 (list (token 'other #\} ))))
+                      (if (= unmatched-paren-count 0)
+                          (whitespace-plugin ts unmatched-paren-count
+                                             last-indent-level
+                                             (append output-stream
+                                                     (list (token 'other #\;))))
+                          (whitespace-plugin ts unmatched-paren-count
+                                             last-indent-level
+                                             output-stream)))))
+            (if (and
+                 (token-is-a-p tk 'other)
+                 (eql (cadr tk) #\( ))
+                (whitespace-plugin ts (1+ unmatched-paren-count)
+                                   last-indent-level
+                                   (append output-stream (list tk)))
+                (if (and
+                     (token-is-a-p tk 'other)
+                     (eql (cadr tk) #\) ))
+                    (whitespace-plugin ts (1- unmatched-paren-count)
+                                       last-indent-level
+                                       (append output-stream (list tk)))
+                    (whitespace-plugin ts unmatched-paren-count
+                                       last-indent-level
+                                       (append output-stream (list tk)))))))
+      output-stream))
+
+(register-pp-tokenstream (function whitespace-plugin))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Compiler
