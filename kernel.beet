@@ -44,16 +44,26 @@ def rest(l)
 def when(condition)
     ~WHEN(condition, eval(_bl))
 
+def if(condition)
+    ~WHEN(condition, eval(_bl))
+
+def else(if_statement, _)
+    when(not if_statement)
+        eval _bl
+
+def _if(condition, y, n)
+    ~IF(condition, y, n)
+
+# Evaluating blocks
 
 def eval(bl, *args)
-    = all_args, ~CONS(bl, args)
+    all_args = ~CONS(bl, args)
     ~APPLY(~FUNCTION(~FUNCALL), all_args)
-
 
 # Basic printing
 def print(str)
     ~FORMAT(~T, "~A~%", str)
-
+    ~T
 
 def p(str)
     ~PRINT(str)
@@ -64,37 +74,38 @@ def p(str)
 def +(l, r)
     ~+(l, r)
 
-
 def *(l, r)
     ~*(l, r)
-
 
 def -(l, r)
     ~-(l, r)
 
-
 def /(l, r)
     ~/(l, r)
-
 
 def <(l, r)
     ~<(l, r)
 
-
 def >(l, r)
     ~>(l, r)
-
-
-def ==(l, r)
-    ~EQUAL(l, r)
-
 
 def mod(n, base)
     ~MOD(n, base)
 
 
+# Boolean functions
+
 def not(expr)
     ~NOT(expr)
+
+def and(l, r)
+    ~AND(l, r)
+
+def or(l, r)
+    ~OR(l, r)
+
+def ==(l, r)
+    ~EQUAL(l, r)
 
 
 # Basic string operations
@@ -102,9 +113,8 @@ def not(expr)
 def glue(*args)
     ~APPLY(~FUNCTION(~CONCATENATE), ~APPEND(~LIST(~QUOTE(~STRING)), args))
 
-
 def substr(str, start, end)
-    + 1, 2
+    ~SUBSEQ(str, start, end)
 
 # Things I need in the preprocessor:
 # Macros (use this as much as possible to implement the remainder)

@@ -20,7 +20,7 @@
 ;; Lexer
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-(defparameter *tokens* '(keyword id eof comma num other string sig-space))
+(defparameter *tokens* '(keyword id eof comma num other string sig-space dot))
 
 (defparameter *beet-keywords* '(def include package macro))
 
@@ -54,7 +54,7 @@
   (and character
        (or (initial-identifier-char-p character)
            (digit-char-p character)
-           (member character '(#\$ #\@ #\! #\? #\. #\+ #\* #\= #\/ #\- #\& #\^
+           (member character '(#\$ #\@ #\! #\? #\+ #\* #\= #\/ #\- #\& #\^
                                #\< #\> #\~ #\:)))))
 
 (defun escape-char-p (character)
@@ -65,6 +65,9 @@
 
 (defun comma-p (character)
   (eql character #\,))
+
+(defun dot-p (character)
+  (eql character #\.))
 
 (defun number-id-helper (id has-seen-decimal)
   (if (eql (length id) 0)
@@ -78,7 +81,6 @@
                (number-id-helper (subseq id 1) t)))
             (t
              nil)))))
-
 
 (defun number-id-p (id)
   (if (eql (length id) 0)
@@ -122,6 +124,25 @@
       (concatenate 'string (list (eat-char stream)) (build-significant-whitespace-token stream))
       nil))
 
+(defun build-number (input-stream output-stream)
+  ;;TODO: error handling
+  (if output-stream
+      (let ((c (safe-peek-char nil input-stream))
+            (in-progress (get-output-stream-string output-stream)))
+        (format output-stream "~A" in-progress)
+        (if (and
+             (not (eof-p input-stream))
+             (number-id-p (concatenate 'string
+                                       in-progress
+                                       (list c))))
+            (progn
+              (format output-stream "~C" (eat-char input-stream))
+              (build-number input-stream output-stream))
+            (get-output-stream-string output-stream)))
+
+      (let ((s (make-string-output-stream)))
+        (build-number input-stream s))))
+
 (defun build-identifier (input-stream output-stream)
   (if output-stream
       (let ((c (safe-peek-char nil input-stream)))
@@ -135,16 +156,17 @@
       (build-identifier input-stream s))))
 
 (defun build-token (input-stream)
-  (if (identifier-char-p (safe-peek-char nil input-stream))
-      (let ((id (build-identifier input-stream nil)))
-        (cond
-         ((number-id-p id)
-          (token 'num (read-from-string id)))
+  (cond
+    ((digit-char-p (safe-peek-char nil input-stream))
+     (token 'num (read-from-string (build-number input-stream nil))))
+    ((identifier-char-p (safe-peek-char nil input-stream))
+     (let ((id (build-identifier input-stream nil)))
+       (cond
          ((keyword-id-p id)
           (token 'keyword id))
          (t
-          (token 'id id))))
-    (token 'other (eat-char input-stream))))
+          (token 'id id)))))
+    (t (token 'other (eat-char input-stream)))))
 
 (defun build-quote-token (input-stream output-stream)
   (if output-stream
@@ -189,6 +211,9 @@
        (eat-comment stream)
        (get-token stream)
        )
+      ((dot-p c)
+       (eat-char stream)
+       (token 'dot #\.))
       ((comma-p c)
        (eat-char stream)
        (token 'comma #\,))
@@ -250,15 +275,21 @@
              (assoc-block (if (eql (cadr (peek-token stream)) #\{ )
                               (parse (next-token stream) stream)
                               nil)))
-         ;; TODO: method . parsing
          (let ((form `(:type functioncall :name ,id :args ,args :bl ,assoc-block)))
-           (if (token-is-a-p (peek-token stream) 'comma)
-               (parse-comma-expr form (next-token stream) stream)
-               form))))
+           (cond ((token-is-a-p (peek-token stream) 'comma)
+                  (parse-comma-expr form (next-token stream) stream))
+                 ((token-is-a-p (peek-token stream) 'dot)
+                  (parse-method-call form (next-token stream) stream))
+                 (t
+                  form)))))
 
       ; comma -> comma expression
       ((token-is-a-p next 'comma)
        (parse-comma-expr id (next-token stream) stream))
+
+      ; dot -> method call
+      ((token-is-a-p next 'dot)
+       (parse-method-call id (next-token stream) stream))
 
       ; just an regular old expression
       (t
@@ -267,16 +298,22 @@
 (defun parse-number-expr (curr-token stream)
   (let ((next (peek-token stream))
         (num `(:type number :value ,(cadr curr-token))))
-    (if (token-is-a-p next 'comma)
-        (parse-comma-expr num (next-token stream) stream)
-        num)))
+    (cond ((token-is-a-p next 'comma)
+           (parse-comma-expr num (next-token stream) stream))
+          ((token-is-a-p next 'dot)
+           (parse-method-call num (next-token stream) stream))
+          (t
+           num))))
 
 (defun parse-string-expr (curr-token stream)
   (let ((next (peek-token stream))
         (str `(:type string :value ,(cadr curr-token))))
-    (if (token-is-a-p next 'comma)
-        (parse-comma-expr str (next-token stream) stream)
-        str)))
+    (cond ((token-is-a-p next 'comma)
+           (parse-comma-expr str (next-token stream) stream))
+          ((token-is-a-p next 'dot)
+           (parse-method-call str (next-token stream) stream))
+          (t
+           str))))
 
 (defun parse-keyword-expr (curr-token stream)
   (case (intern (string-upcase (cadr curr-token)))
@@ -326,12 +363,16 @@
       (let ((node `(:type group :contents ,(parse (next-token stream) stream)))
             (next (next-token stream)))
         (if (eql (cadr next) #\) )
-            (if (and (not bound) (eql (cadr (peek-token stream)) #\, ))
-                (parse-comma-expr node (next-token stream) stream)
-                node)
+            (cond ((and (not bound) (eql (cadr (peek-token stream)) #\, ))
+                   (parse-comma-expr node (next-token stream) stream))
+                  ((token-is-a-p (peek-token stream) 'dot)
+                   (parse-method-call node (next-token stream) stream))
+                  (t
+                   node))
             `(:type error :message ,(concatenate 'string "Expected ) after current node.  "
                                     "Got " (prin1-to-string next)
-                                    "  Current node: " (prin1-to-string node)))))))
+                                    "  Current node: " (prin1-to-string node)
+                                    "  Stream: " (prin1-to-string stream)))))))
 
 (defun parse-block-helper (bl n curr-token stream)
   (let ((next (next-token stream)))
@@ -348,6 +389,9 @@
 
 (defun parse-block-expr (curr-token stream)
   (parse-block-helper () 0 curr-token stream))
+
+(defun parse-method-call (receiver curr-token stream)
+  `(:type methodcall :receiver ,receiver :message ,(parse (next-token stream) stream)))
 
 (defun parse (curr-token stream &optional bound)
     (cond
@@ -477,7 +521,7 @@
 (register-pp-tokenstream (function alias-plugin))
 
 ; significant whitespace plugin
-(defun whitespace-plugin (ts &optional (unmatched-paren-count 0) (last-indent-level (list 0)) output-stream)
+(defun whitespace-plugin (ts &optional (unmatched-paren-count 0) (last-indent-level (list 0)) output-stream last-token-decreased-indent)
   (if (and ts
            (car ts))
       (let ((tk (next-token ts)))
@@ -498,8 +542,9 @@
                       ;; once at the cost of extraneous semicolons.
                       (whitespace-plugin (cons tk ts) unmatched-paren-count (cdr last-indent-level)
                                          (append output-stream
-                                                 (list (token 'other #\} ))))
-                      (if (= unmatched-paren-count 0)
+                                                 (list (token 'other #\} ))) t)
+                      (if (and (= unmatched-paren-count 0)
+                               (not last-token-decreased-indent))
                           (whitespace-plugin ts unmatched-paren-count
                                              last-indent-level
                                              (append output-stream
@@ -525,6 +570,43 @@
       output-stream))
 
 (register-pp-tokenstream (function whitespace-plugin))
+
+; binary operators plugin
+
+(defparameter *beet-binary-operators* '("+" "/" "-" "*" "**" "=" "and" "or" "xor" "==" "else"))
+
+(defun register-binary-operator (binop)
+  (setf *beet-binary-operators* (cons binop *beet-binary-operators)))
+
+(defun binary-operator-plugin-stack (ts &optional out)
+  (if (and ts
+           (car ts))
+      (let ((tk (next-token ts)))
+        (if (and (token-is-a-p tk 'id)
+                 (member (cadr tk) *beet-binary-operators* :test #'equal)
+                 (or (token-is-a-p (car out) 'id)
+                     (token-is-a-p (car out) 'num)
+                     (token-is-a-p (car out) 'string)
+                     (and (token-is-a-p (car out) 'other)
+                          (or (eql (cadr (car out)) #\) )
+                              (eql (cadr (car out)) #\} )))))
+
+            (binary-operator-plugin-stack ts (cons tk (cons (token 'dot #\.) out)))
+            (if (and (token-is-a-p tk 'id)
+                     (equal (cadr tk) "binop"))
+                (progn
+                  (register-binary-operator (next-token ts))
+                  (binary-operator-plugin-stack ts out))
+                (binary-operator-plugin-stack ts (cons tk out)))))
+      out))
+
+(defun binary-operator-plugin (ts)
+  (reverse (binary-operator-plugin-stack ts)))
+
+(register-pp-tokenstream (function binary-operator-plugin))
+
+; if/else plugin
+
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Compiler
@@ -576,18 +658,26 @@
         (read-from-string mangled)
         (intern mangled))))
 
+(defun degroup-helper (node)
+  (if (eq (getf node :type) :grouped)
+      (degroup-helper (getf node :contents))
+      node))
+
 (defun block-assignment-helper (nodes)
   (unless nodes
     (return-from block-assignment-helper nil))
   (let ((node (car nodes)))
-    (if (and (eq (getf node :type) 'functioncall)
-             (equal (getf (getf node :name) :name) "="))
+    (if (and (eq (getf node :type) 'methodcall)
+             ;; TODO: soooooo ugly; fix it
+             (equal (getf (getf (getf node :message) :name) :name) "="))
         ;; It's an assignment.  We need to set up a let and then nest the
         ;; remainder inside.  But first parse out the argument names.
-        (let ((lhs (compile-variable-expr (getf (getf node :args) :first))) ;;TODO: error if it's not a name
-              (rhs (getf (getf node :args) :rest)))
-          `((let ((,lhs ,(compile-node rhs)))
+        (let* ((args (compile-node (getf (getf node :message) :args)))
+               (lhs (compile-node (getf node :receiver)))
+               (rhs args))
+          `((let ((,lhs ,rhs))
              ,@(block-assignment-helper (cdr nodes)))))
+
         ;; Not an assignment; concatenate this to the result of compiling the remainder
         (cons (compile-node node) (block-assignment-helper (cdr nodes))))))
 
@@ -678,6 +768,18 @@
       (compile-beety-function-call node)
       (compile-native-function-call node)))
 
+(defun degroup-args-helper (args)
+  (if (node-type-is args 'group)
+      (getf args :contents)
+      args))
+
+(defun compile-method-call (node)
+  ;;TODO proper implementation
+  ;;TODO (only deals with functions now, doesn't look them up)
+  (let ((fctcall (getf node :message)))
+    (setf (getf fctcall :args)
+          `(:type comma-grouped :first ,(getf node :receiver) :rest ,(degroup-args-helper (getf fctcall :args))))
+    (compile-function-call fctcall)))
 
 
 (defun compile-node (node &optional pkg)
@@ -696,6 +798,8 @@
      (compile-function-definition node pkg))
     ((node-type-is node 'functioncall)
      (compile-function-call node))
+    ((node-type-is node 'methodcall)
+     (compile-method-call node))
     ((node-type-is node 'group)
      (compile-group-expr node))
     ((node-type-is node 'error)
@@ -751,7 +855,7 @@
   (dolist (f (compile-helper input-stream))
     (print f output-stream)))
 
-(defun compile-file (filename output-stream)
+(defun compile-beet-file (filename output-stream)
   (with-open-file (f filename)
     (compile-all f output-stream)))
 
