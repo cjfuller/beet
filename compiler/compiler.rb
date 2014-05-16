@@ -212,11 +212,11 @@ module Parser
         node_with_count
       elsif index < tokens.length
         method_name = "parse_#{tokens[index].type.to_s}"
-        puts "(pne): delegating to #{method_name}"
-        puts "(pne): token is #{tokens[index]}"
+        
+        
         if self.respond_to? method_name then
           result = send(method_name, tokens, index)
-          puts "(pne): result is: #{result}"
+          
           result
         else
           raise BeetSyntaxError, "Unexpected #{tokens[index].inspect} at line #{curr_line}."
@@ -227,7 +227,7 @@ module Parser
     def parse_newline(tokens, index)
       increment_line
       if unmatched_parens?
-        puts "newline thinks there are unmatched parens"
+        
         expr, n = parse_next_expression(tokens, index+1)
         [expr, n+1]
       else
@@ -288,7 +288,7 @@ module Parser
     def parse_id(tokens, index)
       t = tokens[index]
       ast_node = {type: :variable, name: t.v}
-      puts "(pi): name is #{t.v}"
+      
       count = 1
       ast_node, n_method = maybe_parse_method_call(tokens, index + 1, ast_node)
       if n_method > 0 then
@@ -406,9 +406,9 @@ module Parser
       end
       close_paren
       node = {type: :group, contents: expr}
-      puts "(pg): bound? #{bound}"
+      
       unless bound then
-        puts "(pg): maybe parsing method"
+        
         node, n_method = maybe_parse_method_call(tokens, index + 2 + n, node)
         n += n_method
       end
@@ -416,7 +416,7 @@ module Parser
     end
 
     def parse_block(tokens, index)
-      puts "(pb): starting to try block"
+      
       
       # block must start with {.  There may be a newline before that.
 
@@ -429,25 +429,25 @@ module Parser
       
 
       if cumulative_count == tokens.length or tokens[cumulative_count].v != "{" then
-        puts "(pb): no block here"
+        
         return [nil, 0]
       end
 
-      puts "(pb): successful block open"
+      
       
       exprs = []
       cumulative_count += 1 # eat the open bracket
       while tokens[cumulative_count].v != "}" do
-        puts "(pb): continuing to parse block"
+        
         ast, n = parse_next_expression(tokens, cumulative_count)
-        puts "(pb): parsed #{ast}"
+        
         exprs << ast
         cumulative_count += n
         if cumulative_count == tokens.length then
           raise BeetSyntaxError, "Expected block close before EOF.  Block open was at line: #{curr_line}."
         end
       end
-      puts "(pb): successful block close"
+      
       [{type: :block, expressions: exprs}, cumulative_count + 1 - index]
     end
 
@@ -473,12 +473,12 @@ module Parser
 
     def parse_function_definition(tokens, index)
       name = {type: :variable, name: tokens[index + 1].v}
-      puts "(pfd): #{name}"
+      
       args, n_args = parse_args(tokens, index + 2)
-      puts "(pfd - #{name}): #{args}"
+      
       
       bl, n_bl = parse_block(tokens, index + 2 + n_args)
-      puts "(pfd - #{name}): #{bl}"
+      
 
       x = [{type: :function_definition, name: name, args: args, body: bl}, 2 + n_args + n_bl]
       
@@ -500,9 +500,9 @@ module Parser
       while index < tokens.length do
 
         node, n = parse_next_expression(tokens, index)
-        puts "(pa): node is #{node}"
-        puts "(pa): n is #{n}"
-        puts node
+        
+        
+        
         nodes << node
         index += n
       end
