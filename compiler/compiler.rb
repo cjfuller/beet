@@ -9,11 +9,15 @@ Keywords = ['def', 'include', 'package', 'macro', 'binop']
 
 Special_chars = [/\s+/, /(\()/, /(\))/, /({)/, /(})/, /(;)/, /(\.)/, /(,)/, /(#)/]
 
+TokenizerState = {line_number: 0}
+DefaultTokenizerState = {line_number: 0}
+
 class Token
 
-  def initialize(type, v)
+  def initialize(type, v, line_num)
     @type = type
     @v = v
+    @line_num = line_num
   end
 
   def is_type?(type)
@@ -28,7 +32,15 @@ class Token
     "<#{self.type} #{self.v}>"
   end
 
-  attr_accessor :type, :v
+  attr_accessor :type, :v, :line_num
+end
+
+def tk_increment_line
+  TokenizerState[:line_number] += 1
+end
+
+def line_num
+  TokenizerState[:line_number]
 end
 
 def count_and_strip_leading_spaces(line)
@@ -44,7 +56,7 @@ def is_number(str)
 end
 
 def valid_identifier(str)
-  /\A[\|\$\@\!\?\+\*\=\/\-\&\^\<\>\~\:_A-Za-z0-9]+\Z/.match str
+  /\A[\|\$\@\!\?\+\*\=\/\-\&\^\<\>\~\:\'_A-Za-z0-9]+\Z/.match str
 end
 
 def is_blank?(str)
@@ -76,22 +88,23 @@ def make_token_helper(parts, head: nil, head_type: nil)
   part = parts.shift
   if head_type == :string then
     if ends_in_unescaped_quote? part then
-      [Token.new(:string, head + part), make_token_helper(parts)].flatten
+      [Token.new(:string, head + part, line_num), make_token_helper(parts)].flatten
     else
       make_token_helper(parts, head: head + part, head_type: head_type)
     end
   elsif part.start_with? '"' and not ends_in_unescaped_quote? part then
     make_token_helper(parts, head: part, head_type: :string)
   else
-    [Token.new(get_token_type(part), part), make_token_helper(parts)].flatten
+    [Token.new(get_token_type(part), part, line_num), make_token_helper(parts)].flatten
   end
 end
 
 def get_tokens(stream)
-  return [Token.new(:eof, nil)] if stream.eof?
+  tk_increment_line
+  return [Token.new(:eof, nil, line_num)] if stream.eof?
   line, n = count_and_strip_leading_spaces(stream.readline)
   if is_blank? line then
-    return [Token.new(:newline, nil)]
+    return [Token.new(:newline, nil, line_num)]
   end
   parts = line.split /(".*?(?<!\\)(?:\\\\)*")/
   Special_chars.each do |c|
@@ -104,14 +117,15 @@ def get_tokens(stream)
     end
     parts.flatten!
   end
-  tokens = [Token.new(:sig_space, n), make_token_helper(parts)].flatten.delete_if { |e| e.nil? or (e.is_type? :other and e.v == "")}
+  tokens = [Token.new(:sig_space, n, line_num), make_token_helper(parts)].flatten.delete_if { |e| e.nil? or (e.is_type? :other and e.v == "")}
   if i = (tokens.find_index { |e| (e.is_type? :other) and e.v == "#" }) then
     tokens = tokens[0...i]
   end
-  tokens + [Token.new(:newline, nil)]
+  tokens + [Token.new(:newline, nil, line_num)]
 end
 
 def tokenize(stream)
+  TokenizerState.merge! DefaultTokenizerState
   all_tokens = []
   until (t = get_tokens(stream))[-1].is_type? :eof do
     all_tokens = all_tokens.concat t
@@ -127,11 +141,15 @@ module Parser
 
   InitialParserState = {line_number: 1,
     unmatched_paren_count: 0,
-    indent_level: 0}
+    indent_level: 0,
+    macros: {}
+  }
 
   ParserState = {line_number: 1,
     unmatched_paren_count: 0,
-    indent_level: 0}
+    indent_level: 0,
+    macros: {}
+  }
 
   BinaryOperators = %w[+ - / * ** == and or : = :=]
 
@@ -181,11 +199,11 @@ module Parser
 
           if indent_diff > 0 then
             (indent_diff / indent_size).times do |_|
-              output << Token.new(:other, "{")
+              output << Token.new(:other, "{", t.line_num)
             end
           elsif indent_diff < 0 then
             (indent_diff / indent_size).abs.times do |_|
-              output << Token.new(:other, "}")
+              output << Token.new(:other, "}", t.line_num)
             end
           end
 
@@ -212,14 +230,14 @@ module Parser
         node_with_count
       elsif index < tokens.length
         method_name = "parse_#{tokens[index].type.to_s}"
-        
-        
+
+
         if self.respond_to? method_name then
           result = send(method_name, tokens, index)
-          
+
           result
         else
-          raise BeetSyntaxError, "Unexpected #{tokens[index].inspect} at line #{curr_line}."
+          raise BeetSyntaxError, "Unexpected #{tokens[index].inspect} at line #{tokens[index].line_num}."
         end
       end
     end
@@ -227,7 +245,7 @@ module Parser
     def parse_newline(tokens, index)
       increment_line
       if unmatched_parens?
-        
+
         expr, n = parse_next_expression(tokens, index+1)
         [expr, n+1]
       else
@@ -237,12 +255,12 @@ module Parser
 
     def next_starts_function?(nxt)
       # id or number or string or block or parens next -> function call
-      (nxt and (nxt.is_any?(:id, :number, :string) or 
+      (nxt and (nxt.is_any?(:id, :number, :string) or
         nxt.v == "{" or nxt.v == "("))
     end
 
     def maybe_parse_method_call(tokens, index, ast_node)
-            
+
       if tokens[index].is_type? :dot
         msg, n = parse_next_expression(tokens, index + 1)
         [{
@@ -250,17 +268,17 @@ module Parser
           message: msg
           }, n + 1]
       elsif tokens[index].is_type? :id and BinaryOperators.include? tokens[index].v
-        
+
         args, n_args = parse_args(tokens, index + 1)
         bl, n_bl = parse_block(tokens, index + 1 + n_args)
         x = [{
           type: :message, receiver: ast_node,
           message: {type: :function_call, name: {type: :variable, name: tokens[index].v}, args: args, block: bl}
           }, 1 + n_args + n_bl]
-          
+
           x
       else
-        
+
         [ast_node, 0]
       end
     end
@@ -268,16 +286,16 @@ module Parser
     def parse_sig_space(tokens, index)
       retval = [nil, 0]
       new_indent = tokens[index].v
-      
-      
+
+
       if new_indent < curr_indent then
         n_down = (curr_indent - new_indent)/IndentSize
-        
-        tokens[index..index] = (n_down.times.map { |i| Token.new(:other, "}") })
+
+        tokens[index..index] = (n_down.times.map { |i| Token.new(:other, "}", tokens[index].line_num) })
       elsif new_indent > curr_indent then
         n_up = (new_indent - curr_indent)/IndentSize
-        tokens[index..index] = (n_up.times.map { |i| Token.new(:other, "{") })
-        
+        tokens[index..index] = (n_up.times.map { |i| Token.new(:other, "{", tokens[index].line_num) })
+
       else
         retval = [nil, 1]
       end
@@ -288,7 +306,7 @@ module Parser
     def parse_id(tokens, index)
       t = tokens[index]
       ast_node = {type: :variable, name: t.v}
-      
+
       count = 1
       ast_node, n_method = maybe_parse_method_call(tokens, index + 1, ast_node)
       if n_method > 0 then
@@ -297,7 +315,7 @@ module Parser
 
       nxt = index < tokens.length - 1 ? tokens[index+count] : nil
 
-      if next_starts_function? nxt then        
+      if next_starts_function? nxt then
         args, n_eaten = parse_args(tokens, index + 1)
         bl, n_bl_eaten = parse_block(tokens, index + 1 + n_eaten)
         ast_node = {
@@ -349,10 +367,69 @@ module Parser
     end
 
     def parse_macro_def(tokens, index)
-      # a macro def has a more rigid form: a name (id), open parens, a list of names in the expected syntax.  Note that these should be comma separated if it's expected that they'll be called comma separated, space separated if it's exected they'll be space separated, etc., close parens.  If you want something not to be a variable, use a single quote before the name.  If you want one of the arguments to be a block, then prepend an ampersand.  Finally, a block includes the macro body.  All expressions in the macro body are automatically quoted except for the unquoted parameters
+      # a macro def has a more rigid form: a name (id), open parens, a list of
+      # names in the expected syntax.  Note that these should be comma
+      # separated if it's expected that they'll be called comma separated,
+      # space separated if it's exected they'll be space separated, etc., close
+      # parens.  If you want something not to be a variable, use a single quote
+      # before the name.  If you want one of the arguments to be a block, then
+      # prepend an ampersand.  Finally, a block includes the macro body.  All
+      # expressions in the macro body are automatically quoted except for the
+      # unquoted parameters
+      #
+      # Sigils:
+      #   ' quote an argument, requiring that argument to appear verbatim
+      #   & argument is a block
+      #   ? arguments from here to the end are optional; will be quoted
+      #   * varargs -- remaining arguments except a final quoted argument will be globbed into a list.  Final quoted argument acts as a delimiter.
+
       # Example, to define a standard if/else macro:
       # macro if(condition &ifbody 'else &elsebody)
       #     <macro body here>
+
+      macro_name = tokens[index+1].v #TODO: assert valid identifier
+puts macro_name
+      #TODO: assert index + 2 == (
+      internal_parens_count = 0
+      block_syntax = []
+      curr_index = index + 3
+      while tokens[curr_index].v != ')' or internal_parens_count > 0 do
+        block_syntax << tokens[curr_index]
+        if block_syntax[-1] == '(' then
+          internal_parens_count += 1
+        elsif block_syntax[-1] == ')' then
+          internal_parens_count -= 1
+        end
+        curr_index += 1
+      end
+
+      required_token_count = block_syntax.length
+      n_defline = required_token_count + 4
+
+      block_syntax.map! do |el|
+        if el.v.start_with? '\'' then
+          {argtype: :quoted, arg: el.v[1..-1]}
+        elsif el.v.start_with? '&' then
+          {argtype: :block, arg: el.v[1..-1]}
+        elsif el.v.start_with? '?' then
+          {argtype: :optional_to_end, arg: el.v[1..-1]}
+        elsif el.v.start_with? '*' then
+          {argtype: :varargs, arg: el.v[1..-1]}
+        else
+          {argtype: :normal, arg: el.v}
+        end
+      end
+
+      expands_to, n = parse_block(tokens, index + n_defline)
+
+      node = {
+        type: :macro,
+        name: macro_name,
+        syntax: block_syntax,
+        expansion: expands_to
+      }
+
+      [node, n_defline + n]
     end
 
     def expand_macro(tokens, index)
@@ -367,9 +444,9 @@ module Parser
       if tokens[index].v == "(" then
         parse_group(tokens, index, bound: true)
       elsif tokens[index].is_any? :id, :number, :string then
-        
+
         expr = parse_next_expression(tokens, index)
-        
+
         expr
       else
         [nil, 0]
@@ -387,28 +464,28 @@ module Parser
         expr, n = parse_next_expression(tokens, index+1)
         [expr, n + 1]
       else
-        raise BeetSyntaxError, "Unexpected symbol #{tokens[index].v} at line #{curr_line}."
+        raise BeetSyntaxError, "Unexpected symbol #{tokens[index].v} at line #{tokens[index].line_num}."
       end
     end
 
     def parse_group(tokens, index, bound: false)
       open_paren
-      
+
       expr = nil
       n = 0
       if tokens[index + 1].v != ")" then
         expr, n = parse_next_expression(tokens, index + 1)
       end
-      
-      
+
+
       unless tokens[index + n + 1].v == ")" then
-        raise BeetSyntaxError, "Expected close parenthesis after expression #{expr}.  Got #{tokens[index + n + 1].inspect}. At line: #{curr_line}." 
+        raise BeetSyntaxError, "Expected close parenthesis after expression #{expr}.  Got #{tokens[index + n + 1].inspect}. At line: #{tokens[index + n + 1].line_num}."
       end
       close_paren
       node = {type: :group, contents: expr}
-      
+
       unless bound then
-        
+
         node, n_method = maybe_parse_method_call(tokens, index + 2 + n, node)
         n += n_method
       end
@@ -416,8 +493,7 @@ module Parser
     end
 
     def parse_block(tokens, index)
-      
-      
+
       # block must start with {.  There may be a newline before that.
 
       cumulative_count = index
@@ -425,29 +501,22 @@ module Parser
         expr, n = parse_next_expression(tokens, cumulative_count)
         cumulative_count += n
       end
-      
-      
 
       if cumulative_count == tokens.length or tokens[cumulative_count].v != "{" then
-        
+
         return [nil, 0]
       end
-
-      
-      
+      start_count = cumulative_count
       exprs = []
       cumulative_count += 1 # eat the open bracket
       while tokens[cumulative_count].v != "}" do
-        
         ast, n = parse_next_expression(tokens, cumulative_count)
-        
         exprs << ast
         cumulative_count += n
         if cumulative_count == tokens.length then
-          raise BeetSyntaxError, "Expected block close before EOF.  Block open was at line: #{curr_line}."
+          raise BeetSyntaxError, "Expected block close before EOF.  Block open was at line: #{tokens[start_count].line_num}."
         end
       end
-      
       [{type: :block, expressions: exprs}, cumulative_count + 1 - index]
     end
 
@@ -467,21 +536,16 @@ module Parser
       when "macro"
         parse_macro_def(tokens, index)
       else
-        raise BeetSyntaxError, "Unrecognized keyword #{tokens[index].v} at line #{curr_line}."
+        raise BeetSyntaxError, "Unrecognized keyword #{tokens[index].v} at line #{tokens[index].line_num}."
       end
     end
 
     def parse_function_definition(tokens, index)
       name = {type: :variable, name: tokens[index + 1].v}
-      
       args, n_args = parse_args(tokens, index + 2)
-      
-      
       bl, n_bl = parse_block(tokens, index + 2 + n_args)
-      
 
       x = [{type: :function_definition, name: name, args: args, body: bl}, 2 + n_args + n_bl]
-      
       x
     end
 
@@ -500,9 +564,7 @@ module Parser
       while index < tokens.length do
 
         node, n = parse_next_expression(tokens, index)
-        
-        
-        
+
         nodes << node
         index += n
       end
